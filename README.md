@@ -7,7 +7,7 @@ and every lab has a Makefile with `up`, `down`, `test`.
 
 | Lab | Topic | Status |
 |---|---|---|
-| 01 | Web app: CRUD + Postgres + Redis + Nginx + Docker | Not started |
+| 01 | Web app: CRUD + Postgres + Redis + Nginx + Docker | Done (local) |
 | 02 | HA: 3 app servers + HAProxy + failover | Not started |
 | 03 | Database replication | Not started |
 | 04 | Kubernetes debugging lab | Not started |
