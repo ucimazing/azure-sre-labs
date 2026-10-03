@@ -35,10 +35,13 @@ def test_crud_and_cache(client):
     assert r.status_code == 201
     item_id = r.json()["id"]
 
+    cached = "redis" in client.get("/readyz").json()["checks"]
+
     r = client.get(f"/items/{item_id}")
     assert r.status_code == 200 and r.json()["name"] == name
     assert r.headers["x-cache"] == "MISS"
-    assert client.get(f"/items/{item_id}").headers["x-cache"] == "HIT"
+    if cached:
+        assert client.get(f"/items/{item_id}").headers["x-cache"] == "HIT"
 
     r = client.put(f"/items/{item_id}", json={"name": name + "-v2"})
     assert r.status_code == 200

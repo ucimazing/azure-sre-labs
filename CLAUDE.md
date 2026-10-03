@@ -21,4 +21,5 @@ Owner: Umesh (DevOps engineer, aiming for Platform/SRE/DevSecOps). MacBook M1, p
 
 ## Lab status
 Done: 0, 1 (local, tested 2026-10-03; Umesh still to run the break-it exercises).
+Lab 1 Azure deploys written (lab01-web-app/azure/vm and /appservice), plan-checked, not yet applied.
 Next: Lab 6 (Terraform + Ansible), then 10, 2, 3, 11, 12, 7, 8, 9, 4, 5, 13, 14, 15.
