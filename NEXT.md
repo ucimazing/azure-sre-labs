@@ -1,4 +1,10 @@
-# Next steps (updated 2026-10-03)
+# Next steps (updated 2026-10-04)
+
+## NOW: set up the new Azure account (do this first, ~20 min)
+Follow `infra/bootstrap/README.md` steps top to bottom. The finish line is `gh workflow run whoami` going green.
+Then tell Claude "bootstrap done" and it builds the Lab 1 VM CI/CD (GitHub Actions + ACR + ansible-pull).
+Reminder: the $200 credit lasts 30 days (until ~2026-11-03). `make down` after every session.
+
 
 ## New: Lab 1 on Azure (two ways)
 Written and checked with `terraform validate` + `terraform plan` (nothing applied yet). See `lab01-web-app/azure/README.md`.
