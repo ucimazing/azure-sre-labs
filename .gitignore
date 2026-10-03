@@ -1,0 +1,14 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!example.tfvars
+.terraform.lock.hcl.bak
+crash.log
+.env
+*.pem
+*.key
+id_*
+.DS_Store
+__pycache__/
+node_modules/
