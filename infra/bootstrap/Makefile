@@ -42,13 +42,15 @@ apply: check init  ## shows the plan, asks you to type yes
 	terraform apply -var-file=$(TFVARS)
 
 migrate: check  ## move local state into the storage account it just created (one time)
-	@test ! -f backend.tf || { echo "already migrated"; exit 0; }
-	printf 'terraform {\n  backend "azurerm" {}\n}\n' > backend.tf
+	@test ! -f backend.tf || { echo "already migrated"; exit 1; }
+	@# read outputs BEFORE backend.tf exists, otherwise terraform asks for init and returns nothing
+	rg=$$(terraform output -raw state_rg) && sa=$$(terraform output -raw state_sa) && ct=$$(terraform output -raw state_container) && \
+	test -n "$$sa" && \
+	printf 'terraform {\n  backend "azurerm" {}\n}\n' > backend.tf && \
 	terraform init -migrate-state -force-copy \
-	  -backend-config="resource_group_name=$$(terraform output -raw state_rg)" \
-	  -backend-config="storage_account_name=$$(terraform output -raw state_sa)" \
-	  -backend-config="container_name=$$(terraform output -raw state_container)" \
-	  -backend-config="key=bootstrap.tfstate" -backend-config="use_azuread_auth=true"
+	  -backend-config="resource_group_name=$$rg" -backend-config="storage_account_name=$$sa" \
+	  -backend-config="container_name=$$ct" -backend-config="key=bootstrap.tfstate" \
+	  -backend-config="use_azuread_auth=true" || { rm -f backend.tf; exit 1; }
 	rm -f terraform.tfstate terraform.tfstate.backup
 	@echo "migrated. Commit backend.tf."
 
@@ -57,7 +59,7 @@ env:  ## write ~/.lab0.env (the Makefiles in every lab read it); keeps a backup 
 	@printf '%s\n' "# written by infra/bootstrap (make env)" \
 	  "export ARM_SUBSCRIPTION_ID=$(call var,subscription_id)" \
 	  "export ARM_TENANT_ID=$(call var,tenant_id)" \
-	  "export LAB_LOCATION=centralindia" \
+	  "export LAB_LOCATION=$(call var,location)" \
 	  "export STATE_RG=$$(terraform output -raw state_rg)" \
 	  "export STATE_SA=$$(terraform output -raw state_sa)" \
 	  "export STATE_CONTAINER=$$(terraform output -raw state_container)" \
