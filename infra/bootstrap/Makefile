@@ -4,6 +4,10 @@ SHELL := /bin/bash
 TFVARS := terraform.tfvars
 var = $(shell sed -nE 's/^$(1)[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' $(TFVARS))
 export GITHUB_TOKEN := $(shell gh auth token 2>/dev/null)
+# Use your `az login`, never a service principal left over in the shell, and the tfvars tenant/sub.
+unexport ARM_CLIENT_ID ARM_CLIENT_SECRET ARM_CLIENT_CERTIFICATE_PATH ARM_USE_OIDC ARM_USE_MSI
+export ARM_TENANT_ID       := $(call var,tenant_id)
+export ARM_SUBSCRIPTION_ID := $(call var,subscription_id)
 ENV_FILE := $(HOME)/.lab0.env
 
 .PHONY: check providers init plan apply migrate env quota
