@@ -20,7 +20,8 @@ Owner: Umesh (DevOps engineer, aiming for Platform/SRE/DevSecOps). MacBook M1, p
 ## Rules
 - One resource group per lab (rg-labNN-...), tags lab=NN owner=ucimazing env=lab
 - Always tear down (make down) when done. Never delete rg-tfstate.
-- vCPU quota: use Standard_B2s or B1s only (Bsv2 and DSv5 quota is 0)
+- REGION = southindia (new trial). In centralindia this trial blocks every B-series and most D sizes (NotAvailableForSubscription).
+- Trial quota: 4 vCPUs per region. In southindia: B2s/B1s v1 blocked; allowed: B2ats_v2 (2 vCPU/1 GB, ~$0.013/hr, free-tier eligible), B2as_v2/B2s_v2 (2 vCPU/8 GB, ~$0.11/hr), D2s_v5 etc.
 - Build Docker images on the Azure VM (Mac is arm64, VM is amd64)
 - GitHub OIDC (no stored secrets). CI may only grant AcrPull/AcrPush (conditional RBAC admin), add roles in infra/bootstrap/identity.tf. The subject uses IDs: repo:ucimazing@104823239/<repo>@<repo_id>:ref:refs/heads/main
 - Keepalived VRRP does not work on Azure VNets. Use a Standard Load Balancer or unicast.
