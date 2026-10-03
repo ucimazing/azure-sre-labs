@@ -2,7 +2,7 @@
 # Run once per Azure account. Order: make check -> make providers -> make apply -> make migrate -> make env
 SHELL := /bin/bash
 TFVARS := terraform.tfvars
-var = $(shell sed -nE 's/^$(1)[[:space:]]*=[[:space:]]*"?([^"#]*[^"#[:space:]])"?.*/\1/p' $(TFVARS))
+var = $(shell sed -nE 's/^$(1)[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' $(TFVARS))
 export GITHUB_TOKEN := $(shell gh auth token 2>/dev/null)
 ENV_FILE := $(HOME)/.lab0.env
 
