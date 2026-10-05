@@ -8,6 +8,10 @@ variable "admin_cidr" {
   type        = string
 }
 variable "vm-size" {
-  type = string
+  type    = string
   default = "Standard_B2as_V2"
+}
+variable "ssh_public_key" {
+  description = "SSH PUBLIC key for azureuser (contents, not a path). Not a secret. Locally: terraform.tfvars; in CI: TF_VAR_ssh_public_key."
+  type        = string
 }
