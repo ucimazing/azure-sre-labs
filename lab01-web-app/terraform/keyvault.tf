@@ -32,11 +32,27 @@ resource "azurerm_key_vault" "kv" {
 }
 
 # Being subscription Owner lets you MANAGE the vault (control plane) but NOT read/write the
-# secrets inside it (data plane). This role gives YOU data-plane rights, so Terraform can write the secret.
+# secrets inside it (data plane). This role gives data-plane rights to WHOEVER RUNS TERRAFORM,
+# so it can write the secret. Terraform is applied by CI only, so this is the CI identity.
 resource "azurerm_role_assignment" "me_secrets" {
   scope                = azurerm_key_vault.kv.id
   role_definition_name = "Key Vault Secrets Officer"
   principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# A FIXED human admin (you), so you can still read secrets when debugging,
+# no matter who ran Terraform. Comes from the GitHub variable ADMIN_OBJECT_ID.
+resource "azurerm_role_assignment" "admin_secrets" {
+  scope                = azurerm_key_vault.kv.id
+  role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = var.admin_object_id
+}
+
+# A new role assignment takes 1-5 minutes to reach Key Vault (RBAC propagation).
+# Without this pause, a fresh apply in CI fails writing the secret with 403 Forbidden.
+resource "time_sleep" "wait_for_rbac" {
+  create_duration = "120s"
+  depends_on      = [azurerm_role_assignment.me_secrets]
 }
 
 # A USER-ASSIGNED managed identity: an Azure identity for the VM, created as its own resource.
@@ -68,5 +84,5 @@ resource "azurerm_key_vault_secret" "postgres" {
   key_vault_id = azurerm_key_vault.kv.id
 
   # Terraform can't see that writing a secret needs MY role first, so we say it explicitly.
-  depends_on = [azurerm_role_assignment.me_secrets]
+  depends_on = [time_sleep.wait_for_rbac]
 }
