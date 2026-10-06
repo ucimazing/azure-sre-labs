@@ -1,0 +1,100 @@
+# Infrastructure pipeline for Lab 01 (Terraform).
+#   Pull request -> `plan` only: shows what WOULD change, so the reviewer sees it before merging.
+#   Merge to main -> `apply`: pauses for your approval (GitHub environment lab01-vm), then applies.
+# Logs in to Azure with OIDC: no password or client secret exists anywhere.
+name: lab01-infra
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "lab01-web-app/terraform/**"
+      - ".github/workflows/lab01-infra.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "lab01-web-app/terraform/**"
+      - ".github/workflows/lab01-infra.yaml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # allow the job to request a GitHub OIDC token (the "passport")
+  contents: read
+
+# Never run two Terraform jobs at once, and NEVER cancel one halfway
+# (a half-finished apply can leave real resources in a broken state).
+concurrency:
+  group: lab01-infra
+  cancel-in-progress: false
+
+env:
+  # How Terraform logs in: the azurerm provider and backend do the OIDC exchange themselves.
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  # Your gitignored terraform.tfvars, for CI. Any TF_VAR_<name> becomes Terraform variable <name>.
+  TF_VAR_admin_cidr: ${{ vars.ADMIN_CIDR }}
+  TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
+  TF_VAR_admin_object_id: ${{ vars.ADMIN_OBJECT_ID }}
+  TF_IN_AUTOMATION: "true"   # shorter output without "run terraform apply next" hints
+  TF_INPUT: "false"          # never wait for keyboard input (there is no keyboard in CI)
+
+defaults:
+  run:
+    working-directory: lab01-web-app/terraform
+
+jobs:
+  plan:
+    name: Terraform plan (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.5"   # same version as your Mac, so state is never "upgraded" by surprise
+          terraform_wrapper: false
+
+      - name: Init (remote state in rg-tfstate, logged in via OIDC)
+        run: terraform init -backend-config=backend.hcl
+
+      - name: Plan
+        run: terraform plan -no-color -lock-timeout=5m -out=tfplan
+
+      - name: Put the plan on the run's summary page
+        run: |
+          {
+            echo "## Terraform plan for lab01"
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Terraform apply (main, needs approval)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: lab01-vm   # pauses here until you approve; only `main` may deploy (set in the bootstrap)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.5"
+          terraform_wrapper: false
+
+      - name: Init
+        run: terraform init -backend-config=backend.hcl
+
+      - name: Plan (fresh, against the state as it is right now)
+        run: terraform plan -no-color -lock-timeout=5m -out=tfplan
+
+      - name: Apply exactly that plan
+        run: terraform apply -no-color -lock-timeout=5m tfplan
+
+      - name: Show the outputs
+        run: terraform output
