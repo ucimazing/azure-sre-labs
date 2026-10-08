@@ -14,4 +14,4 @@ Lab 1 is complete end to end. The full recap is in [docs/lab01-recap.md](docs/la
 ## Reminders
 - The trial credit ends around **2026-11-03**.
 - The CI identity's RBAC condition was widened by hand (AcrPull, AcrPush, Key Vault Secrets Officer, Key Vault Secrets User). It's not in code.
-- `CLAUDE.md` still says centralindia / B2s. Update it.
+- Delete the old client secret in the OLD tenant's Entra ID (security hygiene).

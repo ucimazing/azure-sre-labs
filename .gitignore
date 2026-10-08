@@ -13,4 +13,5 @@ id_*
 __pycache__/
 node_modules/
 .venv/
+tfplan
 lab01-web-app/ansible/inventory.ini
