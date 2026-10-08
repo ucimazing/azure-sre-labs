@@ -1,5 +1,5 @@
 - name: Set up lab01VM
-  hosts: app
+  hosts: "{{ target | default('app') }}"
   become: true
 
   tasks:
@@ -39,7 +39,7 @@
       ansible.builtin.git:
         repo: https://github.com/ucimazing/azure-sre-labs.git
         dest: /opt/azure-sre-labs
-        version: main
+        version: "{{ app_version | default('main') }}"
     - name: Get a Key Vault token from the VM's managed identity (IMDS)
       ansible.builtin.uri:
         url: "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net&client_id={{ vm_identity_client_id }}"
