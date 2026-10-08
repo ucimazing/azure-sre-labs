@@ -2,7 +2,8 @@
 Owner: Umesh (DevOps engineer, aiming for Platform/SRE/DevSecOps). MacBook M1, personal pay-as-you-go Azure, GitHub user ucimazing.
 
 ## How to work with me
-- I want to do the DevOps/SRE work. YOU write all application code, tests and config, and test it before handing it over.
+- I want to do the DevOps/SRE work. YOU write application code (app/) and its tests, and test them before handing over.
+- I write the DevOps files myself (Dockerfile, compose, nginx, Terraform, Ansible, CI). You review them, explain, and give hints; don't write them for me unless I ask. Earlier Claude-written versions are in git history (e.g. `git show 6faeed5:infra/bootstrap/main.tf`) if I get stuck.
 - Guide me in small concrete steps. I procrastinate and may have ADHD: give a tiny "first 15 minutes" action, then the next step.
 - At the end of each session, write NEXT.md with what to do next.
 
