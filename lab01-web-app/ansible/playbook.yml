@@ -1,0 +1,75 @@
+- name: Set up lab01VM
+  hosts: "{{ target | default('app') }}"
+  become: true
+
+  tasks:
+    - name: Install packages Ansible needs for the Docker repo
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, python3-debian]
+        update_cache: true
+    - name: Add Docker's official apt repository
+      ansible.builtin.deb822_repository:
+        name: docker
+        types: deb
+        uris: https://download.docker.com/linux/ubuntu
+        suites: "{{ ansible_facts['distribution_release'] }}"
+        components: stable
+        architectures: amd64
+        signed_by: https://download.docker.com/linux/ubuntu/gpg
+    - name: Install Docker engine and compose
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        update_cache: true
+    - name: Start Docker now and on every boot
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+    - name: Let azureuser use docker without sudo
+      ansible.builtin.user:
+        name: azureuser
+        groups: docker
+        append: true
+    - name: Get the code from GitHub
+      ansible.builtin.git:
+        repo: https://github.com/ucimazing/azure-sre-labs.git
+        dest: /opt/azure-sre-labs
+        version: "{{ app_version | default('main') }}"
+    - name: Get a Key Vault token from the VM's managed identity (IMDS)
+      ansible.builtin.uri:
+        url: "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net&client_id={{ vm_identity_client_id }}"
+        headers:
+          Metadata: "true"
+      register: kv_token
+      no_log: true
+
+    - name: Read the DB password from Key Vault
+      ansible.builtin.uri:
+        url: "https://{{ key_vault_name }}.vault.azure.net/secrets/postgres-password?api-version=7.4"
+        headers:
+          Authorization: "Bearer {{ kv_token.json.access_token }}"
+      register: kv_secret
+      no_log: true
+
+    - name: Remember the password for the templates
+      ansible.builtin.set_fact:
+        postgres_password: "{{ kv_secret.json.value }}"
+      no_log: true
+
+    - name: Write .env from the templates
+      ansible.builtin.template:
+        src: templates/env.j2
+        dest: /opt/azure-sre-labs/lab01-web-app/.env
+        mode: "0600"
+      no_log: true
+
+    - name: Built and start the stack
+      community.docker.docker_compose_v2:
+        project_src: /opt/azure-sre-labs/lab01-web-app
+        build: always
+        wait: true

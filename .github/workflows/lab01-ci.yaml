@@ -1,0 +1,112 @@
+# CI for Lab 01: proves every change still works BEFORE it reaches main.
+# Runs on every PR into main and on every push to main. Needs no Azure access and no secrets.
+name: lab01-ci
+
+on:
+  pull_request:
+    branches: [main]
+    paths:                                   # only run when Lab 01's files change
+      - "app/**"
+      - "lab01-web-app/**"
+      - ".github/workflows/lab01-ci.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "lab01-web-app/**"
+      - ".github/workflows/lab01-ci.yaml"
+  workflow_dispatch:                         # also allow a manual run from the Actions tab
+
+# Least privilege: the jobs only need to read the repo.
+permissions:
+  contents: read
+
+# A new push to the same PR/branch cancels the run that is still going (saves time).
+concurrency:
+  group: lab01-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------- 1. the app works
+  app-test:
+    name: App tests (full compose stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: lab01-web-app
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip                                    # reuse downloaded packages between runs
+          cache-dependency-path: app/requirements-dev.txt
+
+      - name: Install test dependencies (into the venv the Makefile expects)
+        run: |
+          python -m venv ../app/.venv
+          ../app/.venv/bin/pip install -r ../app/requirements-dev.txt
+
+      - name: Start the stack (make up creates .env from .env.example, fake values only)
+        run: make up
+
+      - name: Wait until the app is really ready (runbook #0, the 502 right after `up`)
+        run: curl -fsS --retry 30 --retry-delay 1 --retry-all-errors http://localhost:8088/readyz
+
+      - name: Run the API tests through nginx
+        run: make test
+
+      - name: Show container logs (only if something failed)
+        if: failure()
+        run: docker compose logs --no-color --tail=100
+
+      - name: Stop the stack (always, even after a failure)
+        if: always()
+        run: make down
+
+  # ---------------------------------------------------------------- 2. the Terraform is valid
+  terraform-check:
+    name: Terraform fmt + validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: lab01-web-app/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Formatting is standard (fails on any misaligned file)
+        run: terraform fmt -check -recursive -diff
+
+      - name: Init without the Azure state backend (this job has no Azure login)
+        run: terraform init -backend=false -input=false
+
+      - name: Configuration is valid
+        run: terraform validate
+
+  # ---------------------------------------------------------------- 3. the Ansible parses
+  ansible-check:
+    name: Ansible syntax check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: lab01-web-app/ansible
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible (the full package includes community.docker)
+        run: pip install ansible
+
+      - name: Playbook syntax check (inventory.ini is gitignored, so pass a dummy one)
+        run: ansible-playbook --syntax-check -i localhost, playbook.yml

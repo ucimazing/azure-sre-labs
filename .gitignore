@@ -14,6 +14,4 @@ __pycache__/
 node_modules/
 .venv/
 tfplan
-lab01-web-app/azure/vm/build/
-lab01-web-app/azure/vm/ansible/inventory.ini
-lab01-web-app/azure/vm/ansible/secrets/
+lab01-web-app/ansible/inventory.ini

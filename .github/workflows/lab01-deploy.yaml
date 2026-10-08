@@ -1,0 +1,99 @@
+# CD for Lab 01: deploy to the VM after CI (tests) or infra (apply) succeeds on main,
+# then run the real test suite against the live VM.
+# No SSH from GitHub, no stored key: Azure's run-command API (OIDC login) starts ansible-pull ON the VM.
+name: lab01-deploy
+
+on:
+  workflow_run:
+    workflows: [lab01-ci, lab01-infra]   # wait for these to finish ...
+    types: [completed]
+    branches: [main]                     # ... on main only (not on PR branches)
+  workflow_dispatch:                     # manual "redeploy" button
+
+permissions:
+  id-token: write   # OIDC token for Azure
+  contents: read
+
+# One deploy at a time, never cancelled halfway. If CI and infra both finish for the same
+# commit, the second deploy simply waits and re-applies (harmless: the playbook is idempotent).
+concurrency:
+  group: lab01-deploy
+  cancel-in-progress: false
+
+env:
+  ARM_USE_OIDC: "true"   # for `terraform output` (reads remote state)
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  RESOURCE_GROUP: rg-lab01-vm
+  VM_NAME: vmm
+  # Deploy EXACTLY the commit that passed CI. (For a manual run: the commit you started it on.)
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  deploy:
+    name: Deploy to VM and test it
+    # Skip if the workflow that triggered us failed: never deploy untested code.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: lab01-vm   # same approval gate and OIDC subject as the infra apply
+    steps:
+      - name: Check out the commit being deployed (for the deploy script and the tests)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Log in to Azure with OIDC (no secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.5"
+          terraform_wrapper: false
+
+      - name: Read what Terraform built (vault name, identity, IP)
+        id: tf
+        working-directory: lab01-web-app/terraform
+        run: |
+          terraform init -input=false -backend-config=backend.hcl >/dev/null
+          echo "key_vault_name=$(terraform output -raw key_vault_name)"               >> "$GITHUB_OUTPUT"
+          echo "identity_client_id=$(terraform output -raw vm_identity_client_id)"    >> "$GITHUB_OUTPUT"
+          echo "public_ip=$(terraform output -raw public_ip)"                         >> "$GITHUB_OUTPUT"
+
+      - name: Deploy (run-command starts ansible-pull on the VM)
+        env:
+          KV: ${{ steps.tf.outputs.key_vault_name }}
+          CLIENT_ID: ${{ steps.tf.outputs.identity_client_id }}
+        run: |
+          # run-command reports "succeeded" even when the script fails, so we check for the
+          # DEPLOY_OK line the script prints only at the very end.
+          out=$(az vm run-command invoke \
+            --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" \
+            --command-id RunShellScript \
+            --scripts @lab01-web-app/deploy/remote-deploy.sh \
+            --parameters "$DEPLOY_SHA" "$KV" "$CLIENT_ID" \
+            --query 'value[0].message' -o tsv)
+          echo "$out"
+          if ! grep -q "DEPLOY_OK ${DEPLOY_SHA}" <<<"$out"; then
+            echo "::error::Deploy did not finish. Full log on the VM: /var/log/lab01-deploy.log"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Smoke test the LIVE VM with the same test suite
+        working-directory: lab01-web-app
+        env:
+          IP: ${{ steps.tf.outputs.public_ip }}
+        run: |
+          python -m venv ../app/.venv
+          ../app/.venv/bin/pip install -q -r ../app/requirements-dev.txt
+          curl -fsS --retry 30 --retry-delay 2 --retry-all-errors "http://$IP/readyz"
+          make test BASE_URL="http://$IP"
