@@ -22,7 +22,16 @@ if ! command -v ansible-pull >/dev/null 2>&1; then
   apt-get install -y -qq ansible >/dev/null
 fi
 
+# Install the playbook's collections at the versions pinned in requirements.yml, read from the
+# SAME commit we deploy. Idempotent: does nothing if they're already installed.
+echo "--- installing pinned collections"
+curl -fsSL "https://raw.githubusercontent.com/ucimazing/azure-sre-labs/${SHA}/lab01-web-app/ansible/requirements.yml" \
+  -o /tmp/lab01-requirements.yml
+ansible-galaxy collection install -r /tmp/lab01-requirements.yml
+
 # Clone/update the repo at the exact commit, then run the playbook against this VM (localhost).
+# (The "Could not match supplied host pattern ... vmm" warnings are harmless: ansible-pull also
+#  tries the VM's hostname, but our inventory only lists localhost.)
 ansible-pull \
   --url "$REPO" \
   --checkout "$SHA" \
