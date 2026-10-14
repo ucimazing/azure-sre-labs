@@ -1,0 +1,64 @@
+# Lab 02 image pipeline: build the app image ONCE and push it to the Lab 2 registry (ACR).
+# Every server in Lab 2 later pulls exactly this image, tagged with the git commit it came from.
+name: lab02-image
+
+on:
+  push:
+    branches: [main]                        # only main publishes images
+    paths:                                  # ...and only when the app (or this file) changed
+      - "app/**"
+      - ".github/workflows/lab02-image.yaml"
+  workflow_dispatch:                        # "Run workflow" button, e.g. after a destroy/re-apply
+
+permissions:
+  id-token: write   # let this job ask GitHub for an OIDC token (passwordless Azure login)
+  contents: read    # read the repo, nothing else
+
+# If two merges land quickly, run their builds one after the other instead of cancelling.
+# Every commit on main gets its own image, so any of them can be deployed or rolled back to.
+concurrency:
+  group: lab02-image
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    name: Build and push sre-lab-app
+    runs-on: ubuntu-latest          # amd64, same CPU type as the Azure VMs
+    timeout-minutes: 15
+    env:
+      # registry/repository:tag. The tag is the full git commit SHA: unique, never overwritten.
+      IMAGE: ${{ vars.LAB02_ACR_NAME }}.azurecr.io/sre-lab-app:${{ github.sha }}
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure with OIDC (no secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to the registry (short-lived token from the Azure login)
+        run: az acr login --name "${{ vars.LAB02_ACR_NAME }}"
+
+      - name: Build the image
+        run: |
+          docker build \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            -t "$IMAGE" \
+            app/
+
+      - name: Push the image
+        run: docker push "$IMAGE"
+
+      - name: Record what was published
+        run: |
+          {
+            echo "### Image published"
+            echo ""
+            echo "\`$IMAGE\`"
+            echo ""
+            echo "From commit [\`${GITHUB_SHA::7}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})."
+          } >> "$GITHUB_STEP_SUMMARY"
