@@ -31,6 +31,12 @@ resource "azurerm_subnet" "db" {
   resource_group_name  = azurerm_resource_group.rg.name
   virtual_network_name = azurerm_virtual_network.vnet.name
   address_prefixes     = ["10.20.3.0/24"]
+  # Azure adds this itself when Postgres is created (it uses Storage for backups/logs).
+  # Declared here so Terraform doesn't try to remove it on every plan (drift).
+  service_endpoint {
+    service = "Microsoft.Storage"
+  }
+
   delegation {
     name = "postgres"
     service_delegation {
