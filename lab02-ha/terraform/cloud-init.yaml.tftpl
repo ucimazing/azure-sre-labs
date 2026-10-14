@@ -1,0 +1,83 @@
+#cloud-config
+# Runs ONCE, on the first boot of every scale-set instance (including ones autoscale or repair create later).
+# Rendered by Terraform's templatefile(): $${...} below are Terraform variables, filled in before Azure sees this.
+# The bash script deliberately avoids $${...} so Terraform doesn't try to interpret it.
+
+package_update: true
+packages:
+  - docker.io        # Docker Engine from Ubuntu's own repository (reached via the NAT Gateway)
+
+write_files:
+  - path: /opt/app/bootstrap.sh
+    permissions: "0700"
+    owner: root:root
+    content: |
+      #!/bin/bash
+      # Pull the app image and start it, using ONLY the VM's managed identity (no keys, no passwords on disk in the repo).
+      set -euo pipefail
+      exec >>/var/log/app-bootstrap.log 2>&1
+      echo "=== bootstrap $(date -u +%FT%TZ)"
+
+      CLIENT_ID="${identity_client_id}"
+      TENANT_ID="${tenant_id}"
+      ACR="${acr_login_server}"
+      IMAGE="${acr_login_server}/sre-lab-app:${image_tag}"
+      KV="${key_vault_name}"
+      DB_HOST="${postgres_fqdn}"
+
+      # Read one field from JSON on stdin (python3 ships with Ubuntu; jq does not).
+      field() { python3 -c 'import sys, json; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
+
+      # Ask the VM's metadata service (IMDS) for a token for an Azure service. Retries: the identity
+      # can take a moment to be ready on a brand-new instance.
+      token() {
+        for i in $(seq 1 30); do
+          if out=$(curl -sf -H Metadata:true \
+              "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=$1&client_id=$CLIENT_ID"); then
+            echo "$out" | field access_token; return 0
+          fi
+          echo "IMDS not ready ($i), retrying"; sleep 5
+        done
+        echo "could not get a token for $1"; return 1
+      }
+
+      # 1. Log Docker in to ACR: trade an Azure (ARM) token for an ACR refresh token, then use it as the password.
+      ARM_TOKEN=$(token "https://management.azure.com/")
+      ACR_TOKEN=$(curl -sf -X POST "https://$ACR/oauth2/exchange" \
+        --data-urlencode "grant_type=access_token" \
+        --data-urlencode "service=$ACR" \
+        --data-urlencode "tenant=$TENANT_ID" \
+        --data-urlencode "access_token=$ARM_TOKEN" | field refresh_token)
+      echo "$ACR_TOKEN" | docker login "$ACR" -u 00000000-0000-0000-0000-000000000000 --password-stdin
+
+      # 2. Read the DB password from Key Vault (role: Key Vault Secrets User).
+      KV_TOKEN=$(token "https://vault.azure.net")
+      DB_PASSWORD=$(curl -sf -H "Authorization: Bearer $KV_TOKEN" \
+        "https://$KV.vault.azure.net/secrets/postgres-password?api-version=7.4" | field value)
+
+      # 3. Write the app's settings. Readable by root only.
+      umask 077
+      cat > /opt/app/.env <<ENV
+      DATABASE_URL=postgresql://pgadmin:$DB_PASSWORD@$DB_HOST:5432/app?sslmode=require
+      REDIS_URL=redis://redis:6379/0
+      ENV
+
+      # 4. Start Redis (a per-server cache, on purpose for the H9 stale-cache exercise) and the app.
+      #    --restart unless-stopped: Docker brings them back after a crash or reboot.
+      docker network inspect app >/dev/null 2>&1 || docker network create app
+      docker rm -f redis app >/dev/null 2>&1 || true
+      docker run -d --name redis --network app --restart unless-stopped redis:7-alpine
+      docker pull "$IMAGE"
+      docker run -d --name app --network app --restart unless-stopped \
+        -p 8000:8000 --env-file /opt/app/.env "$IMAGE"
+
+      # 5. Prove it works from inside the server before declaring success.
+      for i in $(seq 1 30); do
+        if curl -sf http://localhost:8000/readyz; then echo; echo "=== READY"; exit 0; fi
+        sleep 2
+      done
+      echo "=== app did not become ready"; docker logs --tail 50 app; exit 1
+
+runcmd:
+  - systemctl enable --now docker
+  - /opt/app/bootstrap.sh
