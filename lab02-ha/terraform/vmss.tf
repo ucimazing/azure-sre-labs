@@ -43,7 +43,12 @@ resource "azurerm_orchestrated_virtual_machine_scale_set" "app" {
       primary   = true
       subnet_id = azurerm_subnet.app.id # the private subnet: NSG = only App Gateway may reach :8000
       # No public_ip_address block on purpose: these servers are not reachable from the internet.
-      # H6 adds application_gateway_backend_address_pool_ids here.
+
+      # Every instance (including future autoscale/repair ones) joins the App Gateway's pool.
+      # backend_address_pool is a SET, so pick our pool by name and take its id.
+      application_gateway_backend_address_pool_ids = [
+        for pool in azurerm_application_gateway.appgw.backend_address_pool : pool.id if pool.name == local.agw_pool
+      ]
     }
   }
 
