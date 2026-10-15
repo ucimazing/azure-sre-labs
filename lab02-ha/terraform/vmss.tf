@@ -75,6 +75,49 @@ resource "azurerm_orchestrated_virtual_machine_scale_set" "app" {
     }
   }
 
+  # ---- H7: the scale set looks after itself --------------------------------------------------
+
+  # HEALTH: every instance runs Azure's Application Health extension, which checks /healthz
+  # (LIVENESS: "is the app process alive?"). Auto-repair and rolling upgrades both rely on it.
+  # Version 1.0 = "Binary Health States": HTTP 200 means Healthy. (Version 2.0 = "Rich Health
+  # States" requires the body {"ApplicationHealthState": "Healthy"}; without it every instance is
+  # "Unknown", which auto-repair treats as Unhealthy -> it replaced healthy servers in a loop.)
+  # Deliberately NOT /readyz: if the database went down, every instance would fail readiness and
+  # auto-repair would replace ALL of them, over and over (Lab 1's "restart storm").
+  # App Gateway uses /readyz (send traffic?); this extension uses /healthz (replace the machine?).
+  extension {
+    name                               = "app-health"
+    publisher                          = "Microsoft.ManagedServices"
+    type                               = "ApplicationHealthLinux"
+    type_handler_version               = "1.0"
+    auto_upgrade_minor_version_enabled = true
+    settings = jsonencode({
+      protocol    = "http"
+      port        = 8000
+      requestPath = "/healthz"
+    })
+  }
+
+  # REPAIR: an instance whose /healthz keeps failing is replaced with a fresh one.
+  # grace_period: don't judge a new instance for 10 minutes (it needs ~5 to boot and run cloud-init).
+  automatic_instance_repair {
+    enabled      = true
+    grace_period = "PT10M"
+  }
+
+  # UPGRADES: blueprint changes (extensions, image, size) roll out ONE instance at a time.
+  # 34% of 3 instances = 1 per batch; stop if more than 1 instance is unhealthy; wait 2 min between.
+  # Can only be chosen when the scale set is CREATED, so changing it rebuilds the scale set once.
+  upgrade_mode = "Rolling"
+
+  rolling_upgrade_policy {
+    max_batch_instance_percent              = 34
+    max_unhealthy_instance_percent          = 34
+    max_unhealthy_upgraded_instance_percent = 34
+    pause_time_between_batches              = "PT2M"
+    prioritize_unhealthy_instances_enabled  = true # fix broken instances first
+  }
+
   tags = local.tags
 
   # The instance's first boot needs these to exist and be readable. Terraform sees most references,
