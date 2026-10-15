@@ -3,6 +3,7 @@
 *.tfstate.*
 *.tfvars
 !example.tfvars
+!lab02-ha/terraform/env/*.tfvars
 .terraform.lock.hcl.bak
 crash.log
 .env
