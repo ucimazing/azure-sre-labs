@@ -58,7 +58,6 @@ resource "azurerm_orchestrated_virtual_machine_scale_set" "app" {
       identity_client_id = azurerm_user_assigned_identity.app.client_id
       tenant_id          = data.azurerm_client_config.current.tenant_id
       acr_login_server   = azurerm_container_registry.lab02-acr.login_server
-      image_tag          = var.app_image_tag
       key_vault_name     = azurerm_key_vault.kv.name
       postgres_fqdn      = azurerm_postgresql_flexible_server.db.fqdn
     }))
@@ -99,10 +98,11 @@ resource "azurerm_orchestrated_virtual_machine_scale_set" "app" {
   }
 
   # REPAIR: an instance whose /healthz keeps failing is replaced with a fresh one.
-  # grace_period: don't judge a new instance for 10 minutes (it needs ~5 to boot and run cloud-init).
+  # grace_period: don't judge a new instance for 20 minutes. It needs ~5 to boot, and on a brand-new
+  # environment it also waits for the pipeline to build the first image and set app-image-tag.
   automatic_instance_repair {
     enabled      = true
-    grace_period = "PT10M"
+    grace_period = "PT20M"
   }
 
   # UPGRADES: blueprint changes (extensions, image, size) roll out ONE instance at a time.
