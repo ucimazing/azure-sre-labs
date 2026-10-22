@@ -1,0 +1,183 @@
+# Infrastructure pipeline for Lab 02 (Terraform). From now on, Lab 2 is applied ONLY by this pipeline.
+#   Pull request  -> `plan`  : shows what WOULD change, for review before merging.
+#   Merge to main -> `apply` : pauses for approval (environment lab02), applies, and on a brand-new
+#                              environment also builds the first image so the servers can start.
+# Logs in to Azure with OIDC: no password or client secret exists anywhere.
+name: lab02-infra
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "lab02-ha/terraform/**"
+      - ".github/workflows/lab02-infra.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "lab02-ha/terraform/**"
+      - ".github/workflows/lab02-infra.yaml"
+  workflow_dispatch:                 # "Run workflow" button, e.g. to rebuild Lab 2 after a destroy
+
+permissions:
+  id-token: write   # ask GitHub for an OIDC token
+  contents: read
+
+# One Terraform run at a time for Lab 2, and never cancel one halfway.
+concurrency:
+  group: lab02-infra
+  cancel-in-progress: false
+
+env:
+  # How Terraform logs in: the azurerm provider and backend do the OIDC exchange themselves.
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  # Non-secret settings come from the COMMITTED env file, the same one engineers use locally.
+  TF_CLI_ARGS_plan: "-var-file=env/lab02.tfvars"
+  RESOURCE_GROUP: rg-lab02-ha
+  APPGW_NAME: agw-lab02
+
+defaults:
+  run:
+    working-directory: lab02-ha/terraform
+
+jobs:
+  plan:
+    name: Terraform plan (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.5"   # same version everywhere, so state is never upgraded by surprise
+          terraform_wrapper: false
+
+      - name: Formatting is standard
+        run: terraform fmt -check -recursive -diff
+
+      - name: Init (remote state in rg-tfstate, logged in via OIDC)
+        run: terraform init -backend-config=backend.hcl
+
+      - name: Validate
+        run: terraform validate
+
+      - name: Plan
+        run: terraform plan -no-color -lock-timeout=5m -out=tfplan
+
+      - name: Put the plan on the run's summary page
+        run: |
+          {
+            echo "## Terraform plan for lab02"
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Terraform apply (main, needs approval)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: lab02          # pauses for your approval; OIDC subject ...:environment:lab02
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.5"
+          terraform_wrapper: false
+
+      - name: Log in to Azure with OIDC (for the az CLI steps below)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Init
+        run: terraform init -backend-config=backend.hcl
+
+      - name: Plan (fresh, against the state as it is right now)
+        run: terraform plan -no-color -lock-timeout=5m -out=tfplan
+
+      - name: Apply exactly that plan
+        run: terraform apply -no-color -lock-timeout=5m tfplan
+
+      - name: Read what Terraform built
+        id: tf
+        run: |
+          echo "acr_name=$(terraform output -raw acr_name)"                 >> "$GITHUB_OUTPUT"
+          echo "acr_login_server=$(terraform output -raw acr_login_server)" >> "$GITHUB_OUTPUT"
+          echo "key_vault_name=$(terraform output -raw key_vault_name)"     >> "$GITHUB_OUTPUT"
+          echo "appgw_public_ip=$(terraform output -raw appgw_public_ip)"   >> "$GITHUB_OUTPUT"
+
+      # A brand-new environment has an EMPTY registry and no app version. The servers are already
+      # booting and waiting for one, so give them the image of this commit. If the environment
+      # already runs a version, leave it alone: releasing app versions is the deploy pipeline's job.
+      - name: Bootstrap a fresh environment (first image + app-image-tag)
+        working-directory: .
+        env:
+          ACR: ${{ steps.tf.outputs.acr_name }}
+          ACR_SERVER: ${{ steps.tf.outputs.acr_login_server }}
+          KV: ${{ steps.tf.outputs.key_vault_name }}
+        run: |
+          # Does Key Vault already say which version runs? (Retry while RBAC is still propagating.)
+          CURRENT=""
+          for i in $(seq 1 20); do
+            if out=$(az keyvault secret show --vault-name "$KV" -n app-image-tag -o json 2>&1); then
+              CURRENT=$(echo "$out" | jq -r .value); break
+            elif grep -q SecretNotFound <<<"$out"; then
+              CURRENT=""; break
+            fi
+            echo "Key Vault not readable yet ($i/20), retrying"; sleep 15
+          done
+
+          if [ -n "$CURRENT" ]; then
+            echo "Environment already runs sre-lab-app:$CURRENT. Nothing to bootstrap." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          IMAGE="$ACR_SERVER/sre-lab-app:$GITHUB_SHA"
+          echo "Fresh environment: building $IMAGE"
+          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" -t "$IMAGE" app/
+
+          # AcrPush was granted seconds ago by Terraform; retry while it propagates.
+          for i in $(seq 1 15); do
+            if az acr login --name "$ACR" && docker push "$IMAGE"; then break; fi
+            if [ "$i" -eq 15 ]; then echo "::error::could not push $IMAGE"; exit 1; fi
+            echo "push not allowed yet ($i/15), retrying"; sleep 20
+          done
+
+          for i in $(seq 1 15); do
+            if az keyvault secret set --vault-name "$KV" -n app-image-tag --value "$GITHUB_SHA" -o none; then break; fi
+            if [ "$i" -eq 15 ]; then echo "::error::could not set app-image-tag"; exit 1; fi
+            echo "Key Vault write not allowed yet ($i/15), retrying"; sleep 20
+          done
+          echo "Bootstrapped with sre-lab-app:$GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait until the App Gateway sees healthy servers
+        env:
+          IP: ${{ steps.tf.outputs.appgw_public_ip }}
+        run: |
+          for i in $(seq 1 50); do   # up to ~25 minutes on a fresh environment
+            healthy=$(az network application-gateway show-backend-health -g "$RESOURCE_GROUP" -n "$APPGW_NAME" \
+              --query "backendAddressPools[0].backendHttpSettingsCollection[0].servers[?health=='Healthy'] | length(@)" -o tsv 2>/dev/null || echo 0)
+            echo "healthy servers: $healthy ($i/50)"
+            if [ "${healthy:-0}" -ge 3 ]; then
+              curl -fsS "http://$IP/readyz" && echo
+              echo "Lab 2 is up: http://$IP" | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::servers did not become healthy. Check /var/log/app-deploy.log on a VM via run-command."
+          exit 1
+
+      - name: Show the outputs
+        run: terraform output

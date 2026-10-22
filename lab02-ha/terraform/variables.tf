@@ -19,7 +19,3 @@ variable "ssh_public_key" {
   type        = string
 }
 
-variable "app_image_tag" {
-  description = "Which sre-lab-app image the servers run: the git commit SHA it was built from (an existing tag in ACR)."
-  type        = string
-}
