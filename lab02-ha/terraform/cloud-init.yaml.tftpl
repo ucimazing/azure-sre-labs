@@ -2,34 +2,37 @@
 # Runs ONCE, on the first boot of every scale-set instance (including ones autoscale or repair create later).
 # Rendered by Terraform's templatefile(): $${...} below are Terraform variables, filled in before Azure sees this.
 # The bash script deliberately avoids $${...} so Terraform doesn't try to interpret it.
+#
+# WHICH app version runs is NOT in this file. It lives in Key Vault (secret "app-image-tag"), owned by
+# the pipeline. So this file never changes for a new release, new instances always boot the CURRENT
+# version, and the same script below is re-run by the pipeline (run-command) to roll out a release.
 
 package_update: true
 packages:
   - docker.io        # Docker Engine from Ubuntu's own repository (reached via the NAT Gateway)
 
 write_files:
-  - path: /opt/app/bootstrap.sh
+  - path: /opt/app/deploy.sh
     permissions: "0700"
     owner: root:root
     content: |
       #!/bin/bash
-      # Pull the app image and start it, using ONLY the VM's managed identity (no keys, no passwords on disk in the repo).
+      # Run the app version that Key Vault says should run, using ONLY the VM's managed identity.
+      # Idempotent: safe to run again. First boot (cloud-init) and every release (pipeline) use it.
       set -euo pipefail
-      exec >>/var/log/app-bootstrap.log 2>&1
-      echo "=== bootstrap $(date -u +%FT%TZ)"
+      exec >>/var/log/app-deploy.log 2>&1
+      echo "=== deploy $(date -u +%FT%TZ)"
 
       CLIENT_ID="${identity_client_id}"
       TENANT_ID="${tenant_id}"
       ACR="${acr_login_server}"
-      IMAGE="${acr_login_server}/sre-lab-app:${image_tag}"
       KV="${key_vault_name}"
       DB_HOST="${postgres_fqdn}"
 
       # Read one field from JSON on stdin (python3 ships with Ubuntu; jq does not).
       field() { python3 -c 'import sys, json; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
 
-      # Ask the VM's metadata service (IMDS) for a token for an Azure service. Retries: the identity
-      # can take a moment to be ready on a brand-new instance.
+      # Ask the VM's metadata service (IMDS) for a token for an Azure service, with retries.
       token() {
         for i in $(seq 1 30); do
           if out=$(curl -sf -H Metadata:true \
@@ -41,7 +44,32 @@ write_files:
         echo "could not get a token for $1"; return 1
       }
 
-      # 1. Log Docker in to ACR: trade an Azure (ARM) token for an ACR refresh token, then use it as the password.
+      # Read a Key Vault secret (role: Key Vault Secrets User). Fails if it doesn't exist (yet).
+      kv_get() {
+        local kv_token
+        kv_token=$(token "https://vault.azure.net")
+        curl -sf -H "Authorization: Bearer $kv_token" \
+          "https://$KV.vault.azure.net/secrets/$1?api-version=7.4" | field value
+      }
+
+      # 1. Which version should run? On a brand-new environment the pipeline sets it a few minutes
+      #    after these servers are created, so wait for it (up to 30 minutes).
+      TAG=""
+      for i in $(seq 1 90); do
+        if TAG=$(kv_get app-image-tag 2>/dev/null) && [ -n "$TAG" ]; then break; fi
+        TAG=""; echo "no app-image-tag in Key Vault yet ($i/90), waiting"; sleep 20
+      done
+      if [ -z "$TAG" ]; then echo "=== gave up waiting for app-image-tag"; exit 1; fi
+      IMAGE="$ACR/sre-lab-app:$TAG"
+      echo "desired image: $IMAGE"
+
+      # 2. Already running exactly that image and ready? Then there's nothing to do.
+      if [ "$(docker inspect -f '{{.Config.Image}}' app 2>/dev/null || true)" = "$IMAGE" ] \
+         && curl -sf http://localhost:8000/readyz >/dev/null; then
+        echo "=== already running $IMAGE"; exit 0
+      fi
+
+      # 3. Log Docker in to ACR: trade an Azure (ARM) token for an ACR refresh token (role: AcrPull).
       ARM_TOKEN=$(token "https://management.azure.com/")
       ACR_TOKEN=$(curl -sf -X POST "https://$ACR/oauth2/exchange" \
         --data-urlencode "grant_type=access_token" \
@@ -50,34 +78,38 @@ write_files:
         --data-urlencode "access_token=$ARM_TOKEN" | field refresh_token)
       echo "$ACR_TOKEN" | docker login "$ACR" -u 00000000-0000-0000-0000-000000000000 --password-stdin
 
-      # 2. Read the DB password from Key Vault (role: Key Vault Secrets User).
-      KV_TOKEN=$(token "https://vault.azure.net")
-      DB_PASSWORD=$(curl -sf -H "Authorization: Bearer $KV_TOKEN" \
-        "https://$KV.vault.azure.net/secrets/postgres-password?api-version=7.4" | field value)
+      # 4. Pull the image. Retry: on a new environment it may be pushed moments from now.
+      for i in $(seq 1 30); do
+        if docker pull "$IMAGE"; then break; fi
+        if [ "$i" -eq 30 ]; then echo "=== could not pull $IMAGE"; exit 1; fi
+        echo "pull failed ($i/30), retrying"; sleep 20
+      done
 
-      # 3. Write the app's settings. Readable by root only.
+      # 5. Write the app's settings from Key Vault. Readable by root only.
+      DB_PASSWORD=$(kv_get postgres-password)
       umask 077
       cat > /opt/app/.env <<ENV
       DATABASE_URL=postgresql://pgadmin:$DB_PASSWORD@$DB_HOST:5432/app?sslmode=require
       REDIS_URL=redis://redis:6379/0
       ENV
 
-      # 4. Start Redis (a per-server cache, on purpose for the H9 stale-cache exercise) and the app.
-      #    --restart unless-stopped: Docker brings them back after a crash or reboot.
+      # 6. Start Redis if needed (per-server cache, kept across releases), then swap the app container.
       docker network inspect app >/dev/null 2>&1 || docker network create app
-      docker rm -f redis app >/dev/null 2>&1 || true
-      docker run -d --name redis --network app --restart unless-stopped redis:7-alpine
-      docker pull "$IMAGE"
+      if ! docker ps --format '{{.Names}}' | grep -qx redis; then
+        docker rm -f redis >/dev/null 2>&1 || true
+        docker run -d --name redis --network app --restart unless-stopped redis:7-alpine
+      fi
+      docker rm -f app >/dev/null 2>&1 || true
       docker run -d --name app --network app --restart unless-stopped \
         -p 8000:8000 --env-file /opt/app/.env "$IMAGE"
 
-      # 5. Prove it works from inside the server before declaring success.
+      # 7. Prove it works from inside the server. A non-zero exit tells the pipeline this server failed.
       for i in $(seq 1 30); do
-        if curl -sf http://localhost:8000/readyz; then echo; echo "=== READY"; exit 0; fi
+        if curl -sf http://localhost:8000/readyz; then echo; echo "=== READY $IMAGE"; exit 0; fi
         sleep 2
       done
       echo "=== app did not become ready"; docker logs --tail 50 app; exit 1
 
 runcmd:
   - systemctl enable --now docker
-  - /opt/app/bootstrap.sh
+  - /opt/app/deploy.sh
