@@ -4,6 +4,7 @@ Config (env vars):
   DATABASE_URL   postgresql://user:pass@host:5432/db   (required)
   REDIS_URL      redis://host:6379/0                    (optional; cache is skipped if unset or down)
   CACHE_TTL      seconds a cached item lives (default 60)
+  APP_VERSION    the release this image was built from (baked in at build time, default "dev")
 """
 import json
 import logging
@@ -26,6 +27,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 REDIS_URL = os.getenv("REDIS_URL")
 CACHE_TTL = int(os.getenv("CACHE_TTL", "60"))
 HOSTNAME = socket.gethostname()
+APP_VERSION = os.getenv("APP_VERSION", "dev")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -107,7 +109,7 @@ def _cache_del(key: str):
 @app.get("/healthz")
 def healthz():
     """Liveness: the process is up. Does not touch dependencies."""
-    return {"status": "ok", "host": HOSTNAME}
+    return {"status": "ok", "host": HOSTNAME, "version": APP_VERSION}
 
 
 @app.get("/readyz")

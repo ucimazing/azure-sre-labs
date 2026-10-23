@@ -21,6 +21,7 @@ def test_healthz(client):
     r = client.get("/healthz")
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
+    assert r.json()["version"]  # which release answered: "dev" locally, the git commit in Azure
 
 
 def test_readyz(client):
