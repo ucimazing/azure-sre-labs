@@ -145,7 +145,7 @@ jobs:
 
           IMAGE="$ACR_SERVER/sre-lab-app:$GITHUB_SHA"
           echo "Fresh environment: building $IMAGE"
-          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" -t "$IMAGE" app/
+          docker build --build-arg "APP_VERSION=$GITHUB_SHA" --label "org.opencontainers.image.revision=$GITHUB_SHA" -t "$IMAGE" app/
 
           # AcrPush was granted seconds ago by Terraform; retry while it propagates.
           for i in $(seq 1 15); do

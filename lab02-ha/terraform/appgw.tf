@@ -99,6 +99,13 @@ resource "azurerm_application_gateway" "appgw" {
     request_timeout                     = 20
     probe_name                          = local.agw_probe
     pick_host_name_from_backend_address = true
+
+    # When a server LEAVES the pool (a rolling deploy takes it out), requests it is still answering
+    # get up to 30 s to finish instead of being cut off. New requests go to the other servers at once.
+    connection_draining {
+      enabled           = true
+      drain_timeout_sec = 30
+    }
   }
 
   # Ties it together: requests on the listener go to the pool, using those settings.

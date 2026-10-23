@@ -25,9 +25,6 @@ jobs:
     name: Build and push sre-lab-app
     runs-on: ubuntu-latest          # amd64, same CPU type as the Azure VMs
     timeout-minutes: 15
-    env:
-      # registry/repository:tag. The tag is the full git commit SHA: unique, never overwritten.
-      IMAGE: ${{ vars.LAB02_ACR_NAME }}.azurecr.io/sre-lab-app:${{ github.sha }}
     steps:
       - name: Check out the code
         uses: actions/checkout@v4
@@ -39,12 +36,23 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # Ask Azure which registry Lab 2 has right now, instead of a stored name: the registry gets a new
+      # random name every time Lab 2 is rebuilt, and a stored name silently goes stale.
+      - name: Find the Lab 2 registry
+        run: |
+          ACR=$(az acr list -g rg-lab02-ha --query "[0].name" -o tsv)
+          if [ -z "$ACR" ]; then echo "::error::no registry in rg-lab02-ha. Is Lab 2 up?"; exit 1; fi
+          echo "ACR=$ACR" >> "$GITHUB_ENV"
+          # registry/repository:tag. The tag is the full git commit SHA: unique, never overwritten.
+          echo "IMAGE=$ACR.azurecr.io/sre-lab-app:$GITHUB_SHA" >> "$GITHUB_ENV"
+
       - name: Log in to the registry (short-lived token from the Azure login)
-        run: az acr login --name "${{ vars.LAB02_ACR_NAME }}"
+        run: az acr login --name "$ACR"
 
       - name: Build the image
         run: |
           docker build \
+            --build-arg "APP_VERSION=${{ github.sha }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             -t "$IMAGE" \
@@ -61,4 +69,6 @@ jobs:
             echo "\`$IMAGE\`"
             echo ""
             echo "From commit [\`${GITHUB_SHA::7}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})."
+            echo ""
+            echo "Next: the \`lab02-deploy\` pipeline rolls it out (after your approval)."
           } >> "$GITHUB_STEP_SUMMARY"
