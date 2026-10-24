@@ -14,7 +14,6 @@ services:
       test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
       interval: 2s
       retries: 30
-
   pg-replica:
     image: postgres:16
     user: postgres
@@ -26,7 +25,7 @@ services:
         pg_basebackup -h pg-primary -U replicator -D "$$PGDATA" -R -X stream -S replica1 -C -P;
         chmod 700 "$$PGDATA";
       fi;
-      exec postgres'
+      exec postgres -c wal_level=replica -c max_wal_senders=5 -c max_replication_slots=5'
     environment:
       PGPASSWORD: ${REPL_PASSWORD}
       PGDATA: /var/lib/postgresql/data
