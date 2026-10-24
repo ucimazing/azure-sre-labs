@@ -1,7 +1,8 @@
 """Shared lab app: a tiny items CRUD API backed by Postgres, with a Redis read cache.
 
 Config (env vars):
-  DATABASE_URL   postgresql://user:pass@host:5432/db   (required)
+  DATABASE_URL   postgresql://user:pass@host:5432/db   (required; the primary: all writes go here)
+  DATABASE_READ_URL  a read replica                     (optional; reads go here, falling back to the primary)
   REDIS_URL      redis://host:6379/0                    (optional; cache is skipped if unset or down)
   CACHE_TTL      seconds a cached item lives (default 60)
   APP_VERSION    the release this image was built from (baked in at build time, default "dev")
@@ -24,6 +25,9 @@ log = logging.getLogger("app")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 DATABASE_URL = os.environ["DATABASE_URL"]
+DATABASE_READ_URL = os.getenv("DATABASE_READ_URL")
+# Read-your-writes: an item the replica doesn't have YET (replication lag) is looked up on the primary.
+READ_FALLBACK = os.getenv("READ_FALLBACK", "true").lower() == "true"
 REDIS_URL = os.getenv("REDIS_URL")
 CACHE_TTL = int(os.getenv("CACHE_TTL", "60"))
 HOSTNAME = socket.gethostname()
@@ -40,6 +44,10 @@ CREATE TABLE IF NOT EXISTS items (
 
 pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=10, open=False, timeout=5,
                       kwargs={"row_factory": dict_row})
+# Reads use the replica when one is configured. A separate pool, so a slow or dead replica can't use up
+# the connections that writes need.
+read_pool = ConnectionPool(DATABASE_READ_URL, min_size=1, max_size=10, open=False, timeout=2,
+                           kwargs={"row_factory": dict_row}) if DATABASE_READ_URL else None
 cache = redis.Redis.from_url(REDIS_URL, socket_timeout=1, socket_connect_timeout=1,
                              decode_responses=True) if REDIS_URL else None
 
@@ -49,7 +57,11 @@ async def lifespan(_: FastAPI):
     pool.open(wait=True, timeout=30)
     with pool.connection() as conn:
         conn.execute(SCHEMA)
+    if read_pool:
+        read_pool.open(wait=False)  # don't block startup on the replica: reads fall back to the primary
     yield
+    if read_pool:
+        read_pool.close()
     pool.close()
 
 
@@ -75,6 +87,25 @@ class Item(ItemIn):
 
 def _row(r: dict) -> dict:
     return {**r, "created_at": r["created_at"].isoformat()}
+
+
+def _read(sql: str, params: tuple, many: bool, response: Response):
+    """Run a read on the replica if there is one, else (or if it fails) on the primary.
+    Sets X-DB so you can see which server answered."""
+    if read_pool:
+        try:
+            with read_pool.connection() as conn:
+                cur = conn.execute(sql, params)
+                out = cur.fetchall() if many else cur.fetchone()
+            response.headers["X-DB"] = "replica"
+            return out
+        except (PoolTimeout, psycopg.OperationalError) as e:
+            log.warning("replica read failed, using the primary: %s", e)
+    with pool.connection() as conn:
+        cur = conn.execute(sql, params)
+        out = cur.fetchall() if many else cur.fetchone()
+    response.headers["X-DB"] = "primary"
+    return out
 
 
 def _cache_get(key: str):
@@ -128,15 +159,21 @@ def readyz(response: Response):
             checks["redis"] = "ok"
         except redis.RedisError as e:
             checks["redis"] = f"fail: {e.__class__.__name__}"
+    if read_pool:
+        try:
+            with read_pool.connection(timeout=2) as conn:
+                conn.execute("SELECT 1")
+            checks["replica"] = "ok"
+        except Exception as e:  # reported, but not required: reads fall back to the primary
+            checks["replica"] = f"fail: {e.__class__.__name__}"
     ready = checks["postgres"] == "ok"
     response.status_code = 200 if ready else 503
     return {"status": "ready" if ready else "not ready", "host": HOSTNAME, "checks": checks}
 
 
 @app.get("/items", response_model=list[Item])
-def list_items(limit: int = 100):
-    with pool.connection() as conn:
-        rows = conn.execute("SELECT * FROM items ORDER BY id LIMIT %s", (limit,)).fetchall()
+def list_items(response: Response, limit: int = 100):
+    rows = _read("SELECT * FROM items ORDER BY id LIMIT %s", (limit,), True, response)
     return [_row(r) for r in rows]
 
 
@@ -157,8 +194,12 @@ def get_item(item_id: int, response: Response):
     if hit:
         response.headers["X-Cache"] = "HIT"
         return hit
-    with pool.connection() as conn:
-        r = conn.execute("SELECT * FROM items WHERE id = %s", (item_id,)).fetchone()
+    r = _read("SELECT * FROM items WHERE id = %s", (item_id,), False, response)
+    if not r and read_pool and READ_FALLBACK:
+        # Not on the replica: maybe it was JUST created and hasn't replicated yet. Ask the primary.
+        with pool.connection() as conn:
+            r = conn.execute("SELECT * FROM items WHERE id = %s", (item_id,)).fetchone()
+        response.headers["X-DB"] = "primary-fallback"
     if not r:
         raise HTTPException(404, "item not found")
     out = _row(r)
