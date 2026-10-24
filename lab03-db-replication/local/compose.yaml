@@ -35,6 +35,19 @@ services:
       pg-primary:
         condition: service_healthy
 
+  # The app writes to the primary and reads from the replica (R4).
+  app:
+    build: ../../app
+    environment:
+      DATABASE_URL: postgresql://postgres:${PG_PASSWORD}@pg-primary:5432/app
+      DATABASE_READ_URL: postgresql://postgres:${PG_PASSWORD}@pg-replica:5432/app
+      READ_FALLBACK: ${READ_FALLBACK:-true}
+    ports:
+      - "8003:8000"
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+
 volumes:
   primary-data:
   replica-data:
