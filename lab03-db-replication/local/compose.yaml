@@ -1,0 +1,41 @@
+services:
+  pg-primary:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?set PG_PASSWORD in .env}
+      POSTGRES_DB: app
+      REPL_PASSWORD: ${REPL_PASSWORD:?set REPL_PASSWORD in .env}
+    # wal_level=replica: write enough WAL for a replica to replay. Senders/slots: how many replicas may attach.
+    command: postgres -c wal_level=replica -c max_wal_senders=5 -c max_replication_slots=5
+    volumes:
+      - primary-data:/var/lib/postgresql/data
+      - ./init-primary.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 2s
+      retries: 30
+
+  pg-replica:
+    image: postgres:16
+    user: postgres
+    # First start only: copy the primary (pg_basebackup), -R writes the "I am a replica" settings,
+    # -S/-C create and use replication slot replica1. Later starts skip this and just stream.
+    command: >
+      bash -c '
+      if [ ! -s "$$PGDATA/PG_VERSION" ]; then
+        pg_basebackup -h pg-primary -U replicator -D "$$PGDATA" -R -X stream -S replica1 -C -P;
+        chmod 700 "$$PGDATA";
+      fi;
+      exec postgres'
+    environment:
+      PGPASSWORD: ${REPL_PASSWORD}
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - replica-data:/var/lib/postgresql/data
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+
+volumes:
+  primary-data:
+  replica-data:
